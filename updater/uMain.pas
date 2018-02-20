@@ -9,10 +9,10 @@ uses
   cthreads,
   cmem,
   {$endif}
-  Classes, SysUtils, zipper, FileUtil,LazFileUtils, LazUTF8, LazUTF8Classes,
-  Forms, Dialogs, ComCtrls, StdCtrls, Clipbrd, ExtCtrls, DefaultTranslator,
-  RegExpr, IniFiles, USimpleException, uMisc, uTranslation,
-  httpsend, blcksock, ssl_openssl, ssl_openssl_lib, uFMDThread;
+  Classes, SysUtils, zipper, FileUtil, LazFileUtils, LazUTF8, LazUTF8Classes,
+  Forms, Dialogs, ComCtrls, StdCtrls, ExtCtrls, RegExpr, IniFiles, blcksock,
+  ssl_openssl, ssl_openssl_lib, synacode, httpsendthread, uMisc, BaseThread,
+  SimpleTranslator, SimpleException;
 
 type
 
@@ -25,48 +25,45 @@ type
     lbFileSizeValue: TLabel;
     lbStatus: TLabel;
     lbTransferRateValue: TLabel;
-    pbDownload :TProgressBar;
+    pbDownload: TProgressBar;
     procedure FormClose(Sender: TObject; var CloseAction: TCloseAction);
-    procedure FormCreate(Sender :TObject);
+    procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
-    procedure FormShow(Sender :TObject);
+    procedure FormShow(Sender: TObject);
     procedure itMonitorTimer(Sender: TObject);
   private
     { private declarations }
   public
-    procedure ExceptionHandler(Sender: TObject; E: Exception);
     { public declarations }
   end;
 
   { TDownloadThread }
 
-  TDownloadThread = class(TFMDThread)
+  TDownloadThread = class(TBaseThread)
   private
-    FTotalSize, FCurrentSize :integer;
-    FHTTP                    :THTTPSend;
-    FStatus                  :string;
-    FProgress                :string;
-    FErrorMessage            :string;
-    UZip                     :TUnZipper;
+    FTotalSize, FCurrentSize: Integer;
+    FHTTP: THTTPSendThread;
+    FStatus: String;
+    FProgress: String;
+    FErrorMessage: String;
+    UZip: TUnZipper;
   protected
-    procedure SockOnStatus(Sender :TObject; Reason :THookSocketReason;
-      const Value :string);
-    procedure UZipOnStartFile(Sender :TObject; const AFileName :string);
+    procedure SockOnStatus(Sender: TObject; Reason: THookSocketReason;
+      const Value: String);
+    procedure UZipOnStartFile(Sender: TObject; const AFileName: String);
     procedure MainThreadUpdateStatus;
     procedure MainThreadUpdateProgress;
     procedure MainThreadUpdateProgressLabel;
     procedure MainThreadErrorGetting;
-    procedure UpdateStatus(AStatus :string);
-    procedure ShowErrorMessage(AMessage :string);
+    procedure UpdateStatus(AStatus: String);
+    procedure ShowErrorMessage(AMessage: String);
     procedure Execute; override;
-    procedure OnThreadTerminate(Sender: TObject);
   public
-    URL      :string;
-    isSFURL  :boolean;
-    FileName :string;
-    DirPath  :string;
-    MaxRetry :cardinal;
-    Extract  :boolean;
+    URL: String;
+    FileName: String;
+    DirPath: String;
+    MaxRetry: Cardinal;
+    Extract: Boolean;
     constructor Create;
     destructor Destroy; override;
   end;
@@ -74,30 +71,37 @@ type
 procedure IncReadCount(const ACount: Int64);
 
 var
-  frmMain      :TfrmMain;
-  dl           :TDownloadThread;
-  isDownload   :boolean = False;
-  ReadCount    :Integer = 0;
-  CS_ReadCount :TRTLCriticalSection;
+  frmMain: TfrmMain;
+  dl: TDownloadThread;
+  isDownload: Boolean = False;
+  ReadCount: Integer = 0;
+  CS_ReadCount: TRTLCriticalSection;
 
-  _UpdApp    :boolean = False;
-  _Extract   :boolean = False;
-  _NoError   :boolean = False;
-  _URL       :string = '';
-  _MaxRetry  :cardinal = 1;
-  _LaunchApp :string = '';
+  _UpdApp: Boolean = False;
+  _Extract: Boolean = False;
+  _NoError: Boolean = False;
+  _URL: String = '';
+  _MaxRetry: Cardinal = 1;
+  _LaunchApp: String = '';
 
-  ProxyType :string;
-  ProxyHost :string;
-  ProxyPort :string;
-  ProxyUser :string;
-  ProxyPass :string;
+  ProxyType: String;
+  ProxyHost: String;
+  ProxyPort: String;
+  ProxyUser: String;
+  ProxyPass: String;
+
+  FMD_DIR: String;
+  CONFIG_DIR: String;
+  LANGUAGES_DIR: String;
+  CONFIG_FILE: String;
+  SZA: String;
+  OSZA: String;
 
 const
   Symbols: array [0..10] of Char =
     ('\', '/', ':', '*', '?', '"', '<', '>', '|', #9, ';');
 
-  mf_data_link = 'https://www.mediafire.com/folder/fwa8eomz80uk1/Data';
+  UA_CURL = 'curl/7.42.1';
 
 resourcestring
   RS_InvalidURL = 'Invalid URL!';
@@ -117,21 +121,13 @@ resourcestring
   RS_UnpackFile = 'Unpacking file [%s]...';
   RS_Finished = 'Finished.';
   RS_ErrorCheckAntiVirus = 'Error saving file, check your AntiVirus!';
-  RS_FileNotFound_mfdatalink =
-    'File not found!' + LineEnding +
-    'This site probably have been added to unofficial build.' + LineEnding +
-    LineEnding +
-    'Remedy:' + LineEnding +
-    'Build you manga list from scratch or download manually from this link:' +
-    LineEnding +
-    '%s' + LineEnding +
-    'Link copied to clipboard!';
   RS_7zNotFound = 'Can''t extract file because 7za.exe not found!';
   RS_Unknown = '(unknown)';
 
 implementation
 
-uses uMessage;
+uses
+  uMessage;
 
 {$R *.lfm}
 
@@ -169,13 +165,10 @@ constructor TDownloadThread.Create;
 begin
   inherited Create(True);
   isDownload := True;
-  FHTTP := THTTPSend.Create;
-  FHTTP.Headers.NameValueSeparator := ':';
+  FHTTP := THTTPSendThread.Create(Self);
   FHTTP.Sock.OnStatus := @SockOnStatus;
   FHTTP.Timeout := 10000;
-  FHTTP.Sock.ConnectionTimeout := FHTTP.Timeout;
-  FHTTP.Sock.SetTimeout(FHTTP.Timeout);
-  OnCustomTerminate := @OnThreadTerminate;
+  FHTTP.SetProxy(ProxyType, ProxyHost, ProxyPort, ProxyUser, ProxyPass);
   FTotalSize := 0;
   FCurrentSize := 0;
   URL := '';
@@ -197,13 +190,13 @@ begin
   frmMain.lbStatus.Caption := FStatus;
 end;
 
-procedure TDownloadThread.UpdateStatus(AStatus :string);
+procedure TDownloadThread.UpdateStatus(AStatus: String);
 begin
   FStatus := AStatus;
   Synchronize(@MainThreadUpdateStatus);
 end;
 
-procedure TDownloadThread.ShowErrorMessage(AMessage: string);
+procedure TDownloadThread.ShowErrorMessage(AMessage: String);
 begin
   FErrorMessage := AMessage;
   Synchronize(@MainThreadErrorGetting);
@@ -212,7 +205,7 @@ end;
 procedure TDownloadThread.MainThreadUpdateProgress;
 var
   barPos: Integer;
-  prgText: string;
+  prgText: String;
 begin
   if Terminated then Exit;
   if FCurrentSize > 0 then
@@ -244,19 +237,19 @@ begin
       mtError, [mbOK], 0);
 end;
 
-procedure TDownloadThread.SockOnStatus(Sender :TObject; Reason :THookSocketReason;
-  const Value :string);
+procedure TDownloadThread.SockOnStatus(Sender: TObject; Reason: THookSocketReason;
+  const Value: String);
 begin
   if Terminated then Exit;
   if FHTTP.Headers.IndexOfName('Content-Length') > -1 then
     FTotalSize := StrToIntDef(FHTTP.Headers.Values['Content-Length'], 0);
   case Reason of
-    HR_Connect :FCurrentSize := 0;
-    HR_ReadCount :
-      begin
-        Inc(FCurrentSize, StrToIntDef(Value, 0));
-        IncReadCount(StrToIntDef(Value, 0));
-      end;
+    HR_Connect: FCurrentSize := 0;
+    HR_ReadCount:
+    begin
+      Inc(FCurrentSize, StrToIntDef(Value, 0));
+      IncReadCount(StrToIntDef(Value, 0));
+    end;
   end;
   Synchronize(@MainThreadUpdateProgress);
 end;
@@ -266,7 +259,7 @@ begin
   frmMain.lbFileSizeValue.Caption := FProgress;
 end;
 
-procedure TDownloadThread.UZipOnStartFile(Sender :TObject; const AFileName :string);
+procedure TDownloadThread.UZipOnStartFile(Sender: TObject; const AFileName: String);
 begin
   if FileExistsUTF8(AFileName) then
     DeleteFileUTF8(AFileName);
@@ -274,83 +267,39 @@ begin
 end;
 
 procedure TDownloadThread.Execute;
-
-  procedure PrepareHTTP(var HTTP :THTTPSend);
-  begin
-    if HTTP <> nil then
-    begin
-      FHTTP.Clear;
-      FHTTP.Cookies.Clear;
-      FHTTP.Protocol := '1.1';
-      if isSFURL then
-        FHTTP.UserAgent := UA_CURL
-      else
-        FHTTP.UserAgent := DEFAULT_UA;
-      with FHTTP do
-      begin
-        Timeout := 10000;
-        Sock.ConnectionTimeout := Timeout;
-        Sock.SetTimeout(Timeout);
-      end;
-
-      if ProxyType = 'HTTP' then
-      begin
-        HTTP.ProxyHost := ProxyHost;
-        HTTP.ProxyPort := ProxyPort;
-        HTTP.ProxyUser := ProxyUser;
-        HTTP.ProxyPass := ProxyPass;
-      end
-      else
-      if (ProxyType = 'SOCKS4') or (ProxyType = 'SOCKS5') then
-      begin
-        if ProxyType = 'SOCKS4' then
-          HTTP.Sock.SocksType := ST_Socks4
-        else
-        if ProxyType = 'SOCKS5' then
-          HTTP.Sock.SocksType := ST_Socks5;
-        HTTP.Sock.SocksIP := ProxyHost;
-        HTTP.Sock.SocksPort := ProxyPort;
-        HTTP.Sock.SocksUsername := ProxyUser;
-        http.Sock.SocksPassword := ProxyPass;
-      end
-      else
-      begin
-        HTTP.Sock.SocksIP := ProxyHost;
-        HTTP.Sock.SocksPort := ProxyPort;
-        HTTP.Sock.SocksUsername := ProxyUser;
-        http.Sock.SocksPassword := ProxyPass;
-        HTTP.ProxyHost := ProxyHost;
-        HTTP.ProxyPort := ProxyPort;
-        HTTP.ProxyUser := ProxyUser;
-        HTTP.ProxyPass := ProxyPass;
-      end;
-    end;
-  end;
-
 var
-  regx           : TRegExpr;
-  i, ctry        : Cardinal;
-  Sza,
+  sf: Boolean = False;
+  regx: TRegExpr;
+  i, ctry: Cardinal;
+  csza,
   rurl,
   fname,
   sproject,
   sdir,
-  sfile          : String;
+  s, sfile: String;
   st, HTTPHeaders: TStringList;
-  filestream     : TFileStreamUTF8;
+  filestream: TFileStreamUTF8;
 begin
-  URL := Trim(URL);
+  URL := EncodeURL(DecodeURL(Trim(URL)));
   HTTPHeaders := TStringList.Create;
   regx := TRegExpr.Create;
   try
-    HTTPHeaders.NameValueSeparator := ':';
-    PrepareHTTP(FHTTP);
+    HTTPHeaders.Assign(FHTTP.Headers);
     regx.ModifierI := True;
-    if isSFURL then
+    s := LowerCase(URL);
+    if (Pos('sourceforge.net/', s) <> 0) or (Pos('sf.net/', s) <> 0) then
     begin
+      sf := True;
+      FHTTP.UserAgent := UA_CURL;
       regx.Expression := '/download$';
       URL := Trim(regx.Replace(URL, '', False));
-      //**parsing SF url
+      //**parsing and fixing SF url
+      if Pos('sf.net/', s) > 0 then begin
+        URL := StringReplace(URL, 'sf.net/', 'sourceforge.net/', [rfIgnoreCase]);
+        s := LowerCase(URL);
+      end;
+      if Pos('sourceforge.net/p/', s) > 0 then
+        URL := StringReplace(URL, 'sourceforge.net/p/', 'sourceforge.net/projects/', [rfIgnoreCase]);
       regx.Expression := '^.*sourceforge.net/projects/(.+)/files/(.+)/([^/]+)$';
       if not regx.Exec(URL) then
       begin
@@ -363,7 +312,11 @@ begin
       sfile := regx.Replace(URL, '$3', True);
       if FileName = '' then
         FileName := sfile;
-      rurl := 'http://sourceforge.net/projects/' + sproject + '/files/' +
+      if Pos('https://', LowerCase(URL)) = 1 then
+        rurl := 'https://'
+      else
+        rurl := 'http://';
+      rurl := rurl + 'sourceforge.net/projects/' + sproject + '/files/' +
         sdir + '/' + sfile + '/download';
     end
     else
@@ -379,7 +332,7 @@ begin
         FileName := 'new_version.7z';
     end;
 
-    FHTTP.Headers.Text := HTTPHeaders.Text;
+    FHTTP.Headers.Assign(HTTPHeaders);
     //**loading page
     UpdateStatus(RS_LoadingPage);
     ctry := 0;
@@ -404,35 +357,20 @@ begin
       if (FHTTP.ResultCode >= 400) and (FHTTP.ResultCode < 500) then
       begin
         UpdateStatus(RS_FileNotFound);
-        if _UpdApp then
-          ShowErrorMessage(RS_FileNotFound + LineEnding + LineEnding +
-            RS_Response + ':' + LineEnding +
-            IntToStr(FHTTP.ResultCode) + ' ' + FHTTP.ResultString)
-        else
-        begin
-          Clipboard.AsText := mf_data_link;
-          ShowErrorMessage(Format(RS_FileNotFound_mfdatalink, [mf_data_link]));
-        end;
+        ShowErrorMessage(RS_FileNotFound + LineEnding + LineEnding +
+          RS_Response + ':' + LineEnding +
+          IntToStr(FHTTP.ResultCode) + ' ' + FHTTP.ResultString);
         Break;
       end;
       FHTTP.Clear;
     end;
 
-    if (FHTTP.ResultCode >= 300) or isSFURL then
+    if (FHTTP.ResultCode >= 300) and (FHTTP.Headers.Values['Location'] <> '') then
     begin
-      HTTPHeaders.Values['Referer'] := ' ' + rurl;
+      if not sf then
+        HTTPHeaders.Values['Referer'] := ' ' + rurl;
       UpdateStatus(RS_Redirected);
       rurl := Trim(FHTTP.Headers.Values['Location']);
-      if isSFURL then
-      begin
-        if (Pos('use_mirror=', rurl) > 0) then
-        begin
-          regx.Expression := '.*use_mirror=(.+)$';
-          rurl := regx.Replace(rurl, '$1', True);
-          rurl := 'http://' + rurl + '.dl.sourceforge.net/project/' +
-            sproject + '/' + sdir + '/' + sfile;
-        end;
-      end;
     end;
 
     //**download file
@@ -441,8 +379,8 @@ begin
       UpdateStatus(Format(RS_Downloading, [FileName]));
       ctry := 0;
       FHTTP.Clear;
-      HTTPHeaders.Values['Accept'] := ' */*';
-      FHTTP.Headers.Text := HTTPHeaders.Text;
+      FHTTP.Headers.Assign(HTTPHeaders);
+      FHTTP.Cookies.Clear;
       while (not FHTTP.HTTPMethod('GET', Trim(rurl))) or
         (FHTTP.ResultCode >= 300) do
       begin
@@ -463,17 +401,20 @@ begin
         else
         if (FHTTP.ResultCode >= 400) and (FHTTP.ResultCode < 500) then
         begin
-          UpdateStatus(RS_FileNotFound);
-          if _UpdApp then
+          if ctry >= MaxRetry then
+          begin
+            UpdateStatus(RS_FileNotFound);
             ShowErrorMessage(RS_FileNotFound + LineEnding + LineEnding +
               RS_Response + ':' + LineEnding +
-              IntToStr(FHTTP.ResultCode) + ' ' + FHTTP.ResultString)
-          else
-          begin
-            Clipboard.AsText := mf_data_link;
-            ShowErrorMessage(Format(RS_FileNotFound_mfdatalink, [mf_data_link]));
+              IntToStr(FHTTP.ResultCode) + ' ' + FHTTP.ResultString);
+            Break;
           end;
-          Break;
+          //try to load previous url, in case it was temporary url
+          if ctry > 0 then begin
+            rurl := URL;
+            FHTTP.Cookies.Clear;
+          end;
+          Inc(ctry);
         end
         else
         if FHTTP.ResultCode >= 300 then
@@ -482,7 +423,7 @@ begin
           rurl := Trim(FHTTP.Headers.Values['location']);
         end;
         FHTTP.Clear;
-        FHTTP.Headers.Text := HTTPHeaders.Text;
+        FHTTP.Headers.Assign(HTTPHeaders);
       end;
     end;
 
@@ -491,7 +432,7 @@ begin
       (FHTTP.ResultCode >= 100) and (FHTTP.ResultCode < 300) and
       (FCurrentSize >= FTotalSize) then
     begin
-      fname := DirPath + DirectorySeparator + FileName;
+      fname := DirPath + FileName;
       if FileExistsUTF8(fname) then
         DeleteFileUTF8(fname);
 
@@ -516,54 +457,53 @@ begin
         ssl_openssl_lib.DestroySSLInterface;
 
         UpdateStatus(Format(RS_UnpackFile, [fname]));
-        Sza := GetCurrentDirUTF8 + DirectorySeparator + '7za.exe';
         if _UpdApp and
-          FileExistsUTF8(GetCurrentDirUTF8 + DirectorySeparator + '7za.exe') then
-          begin
-            st := TStringList.Create;
-            try
-              FindAllFiles(st, GetCurrentDirUTF8, '*.dbg', False);
-              if st.Count > 0 then
-                for i := 0 to st.Count - 1 do
-                  DeleteFileUTF8(st[i]);
-            finally
-              st.Free;
-            end;
-            CopyFile(GetCurrentDirUTF8 + DirectorySeparator + '7za.exe',
-              GetCurrentDirUTF8 + DirectorySeparator + 'old_7za.exe');
-            Sza := GetCurrentDirUTF8 + DirectorySeparator + 'old_7za.exe';
+          FileExistsUTF8(SZA) then
+        begin
+          st := TStringList.Create;
+          try
+            FindAllFiles(st, FMD_DIR, '*.dbg', False);
+            if st.Count > 0 then
+              for i := 0 to st.Count - 1 do
+                DeleteFileUTF8(st[i]);
+          finally
+            st.Free;
           end;
+          if FileExistsUTF8(OSZA) then
+            DeleteFileUTF8(OSZA);
+          CopyFile(SZA, OSZA);
+          csza := OSZA;
+        end;
         if Pos('.zip', LowerCase(FileName)) <> 0 then
         begin
           UZip := TUnZipper.Create;
           UZip.OnStartFile := @UZipOnStartFile;
           try
-            UZip.FileName := DirPath + DirectorySeparator + FileName;
+            UZip.FileName := DirPath + FileName;
             UZip.OutputPath := Dirpath;
             UZip.Examine;
             UZip.UnZipAllFiles;
           finally
             UZip.Free;
-            DeleteFileUTF8(DirPath + DirectorySeparator + FileName);
+            DeleteFileUTF8(DirPath + FileName);
           end;
         end
         else
         begin
-          if FileExistsUTF8(Sza) then
+          if FileExistsUTF8(csza) then
           begin
-            RunExternalProcess(Sza, ['x', fname, '-o' +
+            RunExternalProcess(csza, ['x', fname, '-o' +
               AnsiQuotedStr(DirPath, '"'), '-aoa'], False, True);
             DeleteFileUTF8(fname);
           end
           else
             ShowErrorMessage(RS_7zNotFound);
         end;
-        if FileExistsUTF8(GetCurrentDirUTF8 + DirectorySeparator + 'old_7za.exe') then
-          if FileExistsUTF8(GetCurrentDirUTF8 + DirectorySeparator + '7za.exe') then
-            DeleteFileUTF8(GetCurrentDirUTF8 + DirectorySeparator + 'old_7za.exe')
+        if FileExistsUTF8(OSZA) then
+          if FileExistsUTF8(SZA) then
+            DeleteFileUTF8(OSZA)
           else
-            RenameFileUTF8(GetCurrentDirUTF8 + DirectorySeparator + 'old_7za.exe',
-              GetCurrentDirUTF8 + DirectorySeparator + '7za.exe');
+            RenameFileUTF8(OSZA, SZA);
       end;
     end;
     UpdateStatus(RS_Finished);
@@ -571,60 +511,72 @@ begin
       RunExternalProcess(_LaunchApp, [''], True, False);
   except
     on E: Exception do
-      frmMain.ExceptionHandler(Self, E);
+      ExceptionHandle(Self, E);
   end;
   regx.Free;
   HTTPHeaders.Free;
-end;
-
-procedure TDownloadThread.OnThreadTerminate(Sender: TObject);
-begin
-  FHTTP.Sock.AbortSocket;
 end;
 
 { TfrmMain }
 
 procedure TfrmMain.FormClose(Sender: TObject; var CloseAction: TCloseAction);
 begin
+  try
   if isDownload then
   begin
     dl.Terminate;
     dl.WaitFor;
   end;
   CloseAction := caFree;
+  except
+    on E: Exception do
+      ExceptionHandle(Self, E);
+  end;
 end;
 
-procedure TfrmMain.FormCreate(Sender :TObject);
-var
-  config :TIniFile;
+procedure TfrmMain.FormCreate(Sender: TObject);
 begin
   Randomize;
-  InitSimpleExceptionHandler(ChangeFileExt(Application.ExeName, '.log'));
-  uTranslation.LangDir := CleanAndExpandDirectory(GetCurrentDirUTF8) + 'languages';
-  uTranslation.LangAppName := 'updater';
-  uTranslation.CollectLanguagesFiles;
+  FMD_DIR := CleanAndExpandDirectory(ExtractFilePath(Application.ExeName));
+  CONFIG_DIR := FMD_DIR + 'config';
+  LANGUAGES_DIR := FMD_DIR + 'languages';
+  CONFIG_FILE := CONFIG_DIR + PathDelim + 'config.ini';
+  SZA := FMD_DIR + '7za.exe';
+  OSZA := FMD_DIR + 'old_7za.exe';
+
+  InitSimpleExceptionHandler;
+  try
+  SimpleTranslator.LangDir := LANGUAGES_DIR;
+  SimpleTranslator.LangAppName := 'updater';
+  SimpleTranslator.CollectLanguagesFiles;
   InitCriticalSection(CS_ReadCount);
   //load proxy config from fmd
-  config := TIniFile.Create('config/config.ini');
-  try
-    if config.ReadBool('connections', 'UseProxy', False) then
-    begin
-      ProxyType := config.ReadString('connections', 'ProxyType', 'HTTP');
-      ProxyHost := config.ReadString('connections', 'Host', '');
-      ProxyPort := config.ReadString('connections', 'Port', '');
-      ProxyUser := config.ReadString('connections', 'User', '');
-      ProxyPass := config.ReadString('connections', 'Pass', '');
-    end
-    else
-    begin
-      ProxyType := '';
-      ProxyHost := '';
-      ProxyPort := '';
-      ProxyUser := '';
-      ProxyPass := '';
+  if not FileExistsUTF8(CONFIG_FILE) then Exit;
+  with TIniFile.Create(CONFIG_FILE) do
+    try
+      SimpleTranslator.SetLang(ReadString('languages', 'Selected', 'en'), 'updater');
+      if ReadBool('connections', 'UseProxy', False) then
+      begin
+        ProxyType := ReadString('connections', 'ProxyType', 'HTTP');
+        ProxyHost := ReadString('connections', 'Host', '');
+        ProxyPort := ReadString('connections', 'Port', '');
+        ProxyUser := ReadString('connections', 'User', '');
+        ProxyPass := ReadString('connections', 'Pass', '');
+      end
+      else
+      begin
+        ProxyType := '';
+        ProxyHost := '';
+        ProxyPort := '';
+        ProxyUser := '';
+        ProxyPass := '';
+      end;
+    finally
+      Free;
     end;
-  finally
-    FreeAndNil(config);
+  except
+    on E: Exception do
+      ExceptionHandle(Self, E);
   end;
 end;
 
@@ -633,12 +585,13 @@ begin
   DoneCriticalsection(CS_ReadCount);
 end;
 
-procedure TfrmMain.FormShow(Sender :TObject);
+procedure TfrmMain.FormShow(Sender: TObject);
 var
-  s :string;
-  i :Integer;
-  sh :boolean = False;
+  s: String;
+  i: Integer;
+  sh: Boolean = False;
 begin
+  try
   if Paramcount > 0 then
   begin
     for i := 1 to Paramcount do
@@ -668,7 +621,7 @@ begin
         else if s = '-l' then
           _LaunchApp := ParamStrUTF8(i + 1)
         else if (LowerCase(s) = '--lang') then
-          uTranslation.SetLang(ParamStrUTF8(i + 1));
+          SimpleTranslator.SetLang(ParamStrUTF8(i + 1), 'updater');
       end;
     end;
   end;
@@ -689,13 +642,11 @@ begin
     begin
       dl := TDownloadThread.Create;
       dl.URL := _URL;
-      dl.isSFURL := (Pos('sourceforge.net/', LowerCase(dl.URL)) <> 0) or
-        (Pos('sf.net/', dl.URL) <> 0);
       dl.MaxRetry := _MaxRetry;
       if _UpdApp then
-        dl.DirPath := GetCurrentDirUTF8
+        dl.DirPath := FMD_DIR
       else
-        dl.DirPath := CleanAndExpandDirectory(GetCurrentDirUTF8) + 'data';
+        dl.DirPath := FMD_DIR + 'data' + PathDelim;
       dl.Extract := _Extract;
       dl.Start;
       itMonitor.Enabled := True;
@@ -705,6 +656,10 @@ begin
       MessageDlg(Application.Title, RS_InvalidURL, mtError, [mbOK], 0);
       Self.Close;
     end;
+  end;
+  except
+    on E: Exception do
+      ExceptionHandle(Self, E);
   end;
 end;
 
@@ -723,13 +678,8 @@ begin
   else
   begin
     itMonitor.Enabled := False;
-    Self.Close
+    Self.Close;
   end;
-end;
-
-procedure TfrmMain.ExceptionHandler(Sender : TObject; E : Exception);
-begin
-  USimpleException.ExceptionHandle(Sender, E);
 end;
 
 end.

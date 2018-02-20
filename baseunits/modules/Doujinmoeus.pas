@@ -5,22 +5,23 @@ unit Doujinmoeus;
 interface
 
 uses
-  Classes, WebsiteModules, uData, uBaseUnit, uDownloadsManager;
+  Classes, WebsiteModules, uData, uBaseUnit, uDownloadsManager, httpsendthread;
 
 implementation
 
 uses
   simplehtmltreeparser, xquery;
 
-function GetDirectoryPageNumber(var MangaInfo: TMangaInformation;
-  var Page: Integer; Module: TModuleContainer): Integer;
+function GetDirectoryPageNumber(const MangaInfo: TMangaInformation;
+  var Page: Integer; const WorkPtr: Integer; const Module: TModuleContainer): Integer;
 begin
   Page := 100;
   Result := NO_ERROR;
 end;
 
-function GetNameAndLink(var MangaInfo: TMangaInformation;
-  const Names, Links: TStringList; const URL: String; Module: TModuleContainer): Integer;
+function GetNameAndLink(const MangaInfo: TMangaInformation;
+  const ANames, ALinks: TStringList; const AURL: String;
+  const Module: TModuleContainer): Integer;
 var
   Source: TStringList;
   Parser: TTreeParser;
@@ -31,7 +32,7 @@ begin
   if MangaInfo = nil then Exit;
   Source := TStringList.Create;
   try
-    s := 'get=' + IncStr(URL);
+    s := 'get=' + IncStr(AURL);
     with MangaInfo.FHTTP.Document do begin
       Clear;
       Write(PChar(s)^, Length(s));
@@ -45,9 +46,9 @@ begin
         if SelectXPathString('json(*)("success")', Parser) = 'true' then
         begin
           for v in SelectXPathIX('json(*)("newest")()("token")', Parser) do
-            Links.Add(v.toString);
+            ALinks.Add(v.toString);
           for v in SelectXPathIX('json(*)("newest")()("name")', Parser) do
-            Names.Add(v.toString);
+            ANames.Add(v.toString);
         end;
       finally
         Parser.Free;
@@ -58,8 +59,8 @@ begin
   end;
 end;
 
-function GetInfo(var MangaInfo: TMangaInformation; const URL: String;
-  const Reconnect: Integer; Module: TModuleContainer): Integer;
+function GetInfo(const MangaInfo: TMangaInformation;
+  const AURL: String; const Module: TModuleContainer): Integer;
 var
   info: TMangaInfo;
   Source: TStringList;
@@ -69,10 +70,10 @@ begin
   if MangaInfo = nil then Exit;
   info := MangaInfo.mangaInfo;
   info.website := Module.Website;
-  info.url := FillHost(Module.RootURL, URL);
+  info.url := FillHost(Module.RootURL, AURL);
   Source := TStringList.Create;
   try
-    if MangaInfo.GetPage(TObject(Source), info.url, Reconnect) then
+    if MangaInfo.FHTTP.GET(info.url, TObject(Source)) then
       if Source.Count > 0 then
       begin
         Result := NO_ERROR;
@@ -109,7 +110,7 @@ begin
   end;
 end;
 
-function TaskStart(var Task: TTaskContainer; Module: TModuleContainer): Boolean;
+function TaskStart(const Task: TTaskContainer; const Module: TModuleContainer): Boolean;
 begin
   Result := True;
   if Task = nil then Exit;
@@ -117,8 +118,8 @@ begin
   Task.PageNumber := 0;
 end;
 
-function GetPageNumber(var DownloadThread: TDownloadThread; const URL: String;
-  Module: TModuleContainer): Boolean;
+function GetPageNumber(const DownloadThread: TDownloadThread;
+  const AURL: String; const Module: TModuleContainer): Boolean;
 var
   Container: TTaskContainer;
   Source: TStringList;
@@ -127,13 +128,13 @@ var
 begin
   Result := False;
   if DownloadThread = nil then Exit;
-  Container := DownloadThread.manager.container;
+  Container := DownloadThread.Task.Container;
   Container.PageLinks.Clear;
   Container.PageContainerLinks.Clear;
   Container.PageNumber := 0;
   Source := TStringList.Create;
   try
-    if DownloadThread.GetPage(TObject(Source), FillHost(Module.RootURL, URL),
+    if DownloadThread.GetPage(TObject(Source), FillHost(Module.RootURL, AURL),
       Container.Manager.retryConnect) then
       if Source.Count > 0 then
       begin
@@ -158,6 +159,7 @@ begin
   begin
     Website := 'Doujin-Moe';
     RootURL := 'http://www.doujin-moe.us';
+    Category := 'H-Sites';
     SortedList := True;
     FavoriteAvailable := False;
     OnGetDirectoryPageNumber := @GetDirectoryPageNumber;
